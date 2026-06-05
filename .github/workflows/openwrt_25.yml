@@ -1,0 +1,117 @@
+name: build-nipovpn-openwrt-bcm2711
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      OPENWRT_VERSION: "25.12.4"
+      OPENWRT_TARGET: "bcm27xx"
+      OPENWRT_SUBTARGET: "bcm2711"
+      OPENWRT_SDK: "openwrt-sdk-25.12.4-bcm27xx-bcm2711_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+      NIPOVPN_REPO: "https://github.com/MortezaBashsiz/nipovpn.git"
+
+    steps:
+      - name: Checkout this workflow repository
+        uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl zstd rsync file make gcc g++ git
+
+      - name: Download OpenWrt SDK
+        run: |
+          set -eux
+          SDK_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}/${OPENWRT_SDK}"
+          curl -fL --retry 3 -o "${OPENWRT_SDK}" "${SDK_URL}"
+          tar --zstd -xf "${OPENWRT_SDK}"
+          SDK_DIR="$(find . -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
+          test -n "${SDK_DIR}"
+          echo "SDK_DIR=${SDK_DIR}" >> "$GITHUB_ENV"
+
+      - name: Create OpenWrt package recipe
+        run: |
+          set -eux
+      
+          cd "$SDK_DIR"
+      
+          mkdir -p package/nipovpn
+      
+          cat > package/nipovpn/Makefile <<'EOF'
+          ...
+          EOF
+      
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
+
+          cat > package/nipovpn/Makefile <<'EOF'
+          include $(TOPDIR)/rules.mk
+
+          PKG_NAME:=nipovpn
+          PKG_VERSION:=git
+          PKG_RELEASE:=1
+
+          PKG_SOURCE_PROTO:=git
+          PKG_SOURCE_URL:=https://github.com/MortezaBashsiz/nipovpn.git
+          PKG_SOURCE_VERSION:=$(GITHUB_SHA)
+          PKG_MIRROR_HASH:=skip
+
+          PKG_LICENSE:=GPL-3.0
+          PKG_LICENSE_FILES:=LICENSE
+
+          PKG_BUILD_PARALLEL:=1
+
+          include $(INCLUDE_DIR)/package.mk
+          include $(INCLUDE_DIR)/cmake.mk
+
+          CMAKE_BINARY_SUBDIR:=build
+          CMAKE_OPTIONS += -DCMAKE_BUILD_TYPE=Release
+
+          define Package/nipovpn
+            SECTION:=net
+            CATEGORY:=Network
+            TITLE:=NipoVPN
+            DEPENDS:=+libboost-system +libboost-regex +libyaml-cpp +libopenssl
+          endef
+
+          define Package/nipovpn/description
+            NipoVPN is a C++ proxy tool that uses Boost, yaml-cpp, and OpenSSL.
+          endef
+
+          define Package/nipovpn/install
+            $(INSTALL_DIR) $(1)/usr/bin
+            $(INSTALL_BIN) $(PKG_BUILD_DIR)/build/core/nipovpn $(1)/usr/bin/nipovpn
+          endef
+
+          $(eval $(call BuildPackage,nipovpn))
+          EOF
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
+
+      - name: Build ipk
+        run: |
+          set -eux
+      
+          cd "$SDK_DIR"
+      
+          make package/nipovpn/compile V=s -j"$(nproc)"
+
+      - name: Collect artifacts
+        run: |
+          set -eux
+          find "${SDK_DIR}/bin/packages" -name 'nipovpn*.ipk' -o -name 'Packages*' | sort
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nipovpn-openwrt-bcm2711
+          path: |
+            ${{ env.SDK_DIR }}/bin/packages/**/*.ipk
+            ${{ env.SDK_DIR }}/bin/packages/**/Packages*
